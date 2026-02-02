@@ -1,4 +1,5 @@
 .env_variables.json
+.env.custom.minio.n8n
 .DS_Store
 .env_shell.json
 .env
