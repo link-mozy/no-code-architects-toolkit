@@ -95,23 +95,31 @@ def get_video_resolution(video_path):
         return 384, 288
 
 def get_available_fonts():
-    """Get the list of available fonts on the system."""
+    """Get the list of available fonts using fontconfig (fc-list)."""
     try:
-        import matplotlib.font_manager as fm
-    except ImportError:
-        logger.error("matplotlib not installed. Install via 'pip install matplotlib'.")
+        result = subprocess.run(
+            ['fc-list', ':', 'family'],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        font_names = set()
+        for line in result.stdout.splitlines():
+            # fc-list output format: "Font Family,Alternative Name"
+            # Split by comma and add all family names
+            families = line.split(',')
+            for family in families:
+                family_name = family.strip()
+                if family_name:
+                    font_names.add(family_name)
+        logger.info(f"Available fonts retrieved from fontconfig: {len(font_names)} fonts found")
+        return list(font_names)
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Error running fc-list: {str(e)}")
         return []
-    font_list = fm.findSystemFonts(fontpaths=None, fontext='ttf')
-    font_names = set()
-    for font in font_list:
-        try:
-            font_prop = fm.FontProperties(fname=font)
-            font_name = font_prop.get_name()
-            font_names.add(font_name)
-        except Exception:
-            continue
-    logger.info(f"Available fonts retrieved: {font_names}")
-    return list(font_names)
+    except FileNotFoundError:
+        logger.error("fc-list command not found. fontconfig may not be installed.")
+        return []
 
 def format_ass_time(seconds):
     """Convert float seconds to ASS time format H:MM:SS.cc"""
@@ -249,14 +257,20 @@ def create_style_line(style_options, video_resolution):
     """
     font_family = style_options.get('font_family', 'Arial')
     available_fonts = get_available_fonts()
-    if font_family not in available_fonts:
-        logger.warning(f"Font '{font_family}' not found.")
+
+    # Case-insensitive font matching
+    font_family_lower = font_family.lower()
+    available_fonts_lower = [f.lower() for f in available_fonts]
+
+    if font_family_lower not in available_fonts_lower:
+        logger.warning(f"Font '{font_family}' not found in fontconfig.")
         return {'error': f"Font '{font_family}' not available.", 'available_fonts': available_fonts}
 
     line_color = rgb_to_ass_color(style_options.get('line_color', '#FFFFFF'))
     secondary_color = line_color
     outline_color = rgb_to_ass_color(style_options.get('outline_color', '#000000'))
-    box_color = rgb_to_ass_color(style_options.get('box_color', '#000000'))
+    # Support both back_color and box_color (back_color takes precedence)
+    box_color = rgb_to_ass_color(style_options.get('back_color') or style_options.get('box_color', '#000000'))
 
     font_size = style_options.get('font_size', int(video_resolution[1] * 0.05))
     bold = '1' if style_options.get('bold', False) else '0'
@@ -775,8 +789,13 @@ def generate_ass_captions_v1(video_url, captions, settings, replace, exclude_tim
         # Check font availability
         font_family = style_options.get('font_family', 'Arial')
         available_fonts = get_available_fonts()
-        if font_family not in available_fonts:
-            logger.warning(f"Job {job_id}: Font '{font_family}' not found.")
+
+        # Case-insensitive font matching
+        font_family_lower = font_family.lower()
+        available_fonts_lower = [f.lower() for f in available_fonts]
+
+        if font_family_lower not in available_fonts_lower:
+            logger.warning(f"Job {job_id}: Font '{font_family}' not found in fontconfig.")
             # Return font error with available_fonts
             return {"error": f"Font '{font_family}' not available.", "available_fonts": available_fonts}
 
