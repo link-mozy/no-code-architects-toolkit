@@ -41,6 +41,7 @@ logger = logging.getLogger(__name__)
                 "line_color": {"type": "string"},
                 "word_color": {"type": "string"},
                 "outline_color": {"type": "string"},
+                "back_color": {"type": "string"},
                 "all_caps": {"type": "boolean"},
                 "max_words_per_line": {"type": "integer"},
                 "x": {"type": "integer"},
