@@ -68,6 +68,7 @@ logger = logging.getLogger(__name__)
                     "type": "string",
                     "enum": ["classic", "karaoke", "highlight", "underline", "word_by_word"]
                 },
+                "box": {"type": "boolean"},
                 "outline_width": {"type": "integer"},
                 "spacing": {"type": "integer"},
                 "angle": {"type": "integer"},

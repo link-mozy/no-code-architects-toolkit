@@ -28,7 +28,7 @@ from services.file_management import download_file
 from services.cloud_storage import upload_file  # Ensure this import is present
 import requests  # Ensure requests is imported for webhook handling
 from urllib.parse import urlparse
-from config import LOCAL_STORAGE_PATH
+from config import LOCAL_STORAGE_PATH, CUSTOM_FONTS_DIR
 
 # Initialize logger
 logger = logging.getLogger(__name__)
@@ -94,32 +94,91 @@ def get_video_resolution(video_path):
         logger.error(f"Error getting video resolution: {str(e)}. Using default resolution 384x288.")
         return 384, 288
 
+# All font filenames (without extension) in CUSTOM_FONTS_DIR are accepted as font_family.
+# This set is only for ASS output: these names have fontconfig aliases, so we use them as-is
+# in the ASS file instead of mapping to fc-query family (which would lose Bold/Italic).
+FONTCONFIG_ALIAS_NAMES = {'arialbd', 'ariali', 'arialbi'}
+
+_custom_fonts_cache = None  # (set of filename_no_ext, dict filename_no_ext -> family for ASS)
+
+
+def _get_custom_fonts_cache():
+    """Scan CUSTOM_FONTS_DIR. Returns (set of all accepted font names = filenames without extension, filename_no_ext -> family for ASS)."""
+    global _custom_fonts_cache
+    if _custom_fonts_cache is not None:
+        return _custom_fonts_cache
+    names = set()
+    filename_to_family = {}
+    if not os.path.isdir(CUSTOM_FONTS_DIR):
+        _custom_fonts_cache = (names, filename_to_family)
+        return _custom_fonts_cache
+    for f in os.listdir(CUSTOM_FONTS_DIR):
+        if not f.lower().endswith(('.ttf', '.otf')):
+            continue
+        path = os.path.join(CUSTOM_FONTS_DIR, f)
+        if not os.path.isfile(path):
+            continue
+        name_no_ext = os.path.splitext(f)[0]
+        names.add(name_no_ext)  # every font filename (no ext) is accepted as font_family
+        if name_no_ext.lower() in FONTCONFIG_ALIAS_NAMES:
+            continue  # skip mapping for these; they use fontconfig alias in ASS
+        try:
+            r = subprocess.run(
+                ['fc-query', '--format=%{family}\n', path],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+            if r.returncode == 0 and r.stdout and r.stdout.strip():
+                # ASS uses comma as field separator; use only first family if fc-query returns "Name1, Name2"
+                family = r.stdout.strip().split('\n')[0].strip().split(',')[0].strip()
+                if family:
+                    filename_to_family[name_no_ext] = family
+        except (subprocess.TimeoutExpired, OSError, Exception):
+            pass
+    _custom_fonts_cache = (names, filename_to_family)
+    logger.info(f"Custom fonts: {len(names)} names, {len(filename_to_family)} filename->family mappings from {CUSTOM_FONTS_DIR}")
+    return _custom_fonts_cache
+
+
+def resolve_font_family_for_ass(font_family):
+    """Return the font name to use in the ASS file (fontconfig-resolvable). Uses filename->family map when needed.
+    ASS style line uses comma as separator; returned name must not contain commas."""
+    _, filename_to_family = _get_custom_fonts_cache()
+    for name_no_ext, family in filename_to_family.items():
+        if name_no_ext.lower() == font_family.lower():
+            # ASS forbids comma in Fontname; take first family only
+            return family.split(',')[0].strip() if family else font_family
+    # Ensure no comma in output (ASS uses comma as field separator)
+    return (font_family or '').split(',')[0].strip() or font_family
+
+
 def get_available_fonts():
-    """Get the list of available fonts using fontconfig (fc-list)."""
+    """Get the list of available fonts: fontconfig (fc-list) + custom fonts dir (filename without extension)."""
+    font_names = set()
     try:
         result = subprocess.run(
             ['fc-list', ':', 'family'],
             capture_output=True,
             text=True,
-            check=True
+            check=True,
         )
-        font_names = set()
         for line in result.stdout.splitlines():
-            # fc-list output format: "Font Family,Alternative Name"
-            # Split by comma and add all family names
             families = line.split(',')
             for family in families:
                 family_name = family.strip()
                 if family_name:
                     font_names.add(family_name)
-        logger.info(f"Available fonts retrieved from fontconfig: {len(font_names)} fonts found")
-        return list(font_names)
-    except subprocess.CalledProcessError as e:
-        logger.error(f"Error running fc-list: {str(e)}")
-        return []
-    except FileNotFoundError:
-        logger.error("fc-list command not found. fontconfig may not be installed.")
-        return []
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        logger.debug(f"fc-list not used: {e}")
+    custom_names, _ = _get_custom_fonts_cache()
+    font_names.update(custom_names)
+    font_names_lower = {f.lower() for f in font_names}
+    if 'arial' in font_names_lower:
+        font_names.update(('ARIALBD', 'ARIALI', 'ARIALBI'))
+    logger.info(f"Available fonts: {len(font_names)} (fontconfig + custom dir)")
+    return list(font_names)
 
 def format_ass_time(seconds):
     """Convert float seconds to ASS time format H:MM:SS.cc"""
@@ -140,6 +199,63 @@ def process_subtitle_text(text, replace_dict, all_caps, max_words_per_line):
         lines = [' '.join(words[i:i+max_words_per_line]) for i in range(0, len(words), max_words_per_line)]
         text = '\\N'.join(lines)
     return text
+
+def is_srt_format(content):
+    """
+    Check if content is in SRT format.
+    SRT format typically starts with a number, followed by timestamp lines.
+    """
+    if not content or not isinstance(content, str):
+        return False
+    
+    content = content.strip()
+    if not content:
+        return False
+    
+    # Try to parse as SRT - if it succeeds, it's SRT format
+    try:
+        subtitles = list(srt.parse(content))
+        # If parsing succeeds and we got at least one subtitle, it's SRT
+        return len(subtitles) > 0
+    except (srt.SRTParseError, ValueError, AttributeError):
+        # If parsing fails, it's not SRT format
+        return False
+
+def get_video_duration(video_path):
+    """Get video duration in seconds using ffprobe."""
+    try:
+        probe_cmd = [
+            'ffprobe', 
+            '-v', 'error', 
+            '-show_entries', 'format=duration', 
+            '-of', 'default=noprint_wrappers=1:nokey=1',
+            video_path
+        ]
+        duration_result = subprocess.run(probe_cmd, capture_output=True, text=True)
+        duration = float(duration_result.stdout.strip())
+        return duration
+    except (ValueError, subprocess.SubprocessError) as e:
+        logger.warning(f"Could not determine video duration: {str(e)}")
+        return None
+
+def plain_text_to_transcription_result(text, video_duration):
+    """
+    Convert plain text into a transcription-like structure.
+    The text will be displayed for the entire video duration.
+    """
+    if video_duration is None or video_duration <= 0:
+        # Fallback: use 10 seconds if duration cannot be determined
+        video_duration = 10.0
+        logger.warning("Video duration not available, using 10 seconds as fallback.")
+    
+    segments = [{
+        'start': 0.0,
+        'end': video_duration,
+        'text': text.strip(),
+        'words': []
+    }]
+    logger.info(f"Converted plain text to transcription result (duration: {video_duration}s).")
+    return {'segments': segments}
 
 def srt_to_transcription_result(srt_content):
     """Convert SRT content into a transcription-like structure for uniform processing."""
@@ -266,6 +382,9 @@ def create_style_line(style_options, video_resolution):
         logger.warning(f"Font '{font_family}' not found in fontconfig.")
         return {'error': f"Font '{font_family}' not available.", 'available_fonts': available_fonts}
 
+    # Use fontconfig-resolvable name in ASS (e.g. filename -> family when different)
+    ass_font_name = resolve_font_family_for_ass(font_family)
+
     line_color = rgb_to_ass_color(style_options.get('line_color', '#FFFFFF'))
     secondary_color = line_color
     outline_color = rgb_to_ass_color(style_options.get('outline_color', '#000000'))
@@ -281,7 +400,9 @@ def create_style_line(style_options, video_resolution):
     scale_y = style_options.get('scale_y', '100')
     spacing = style_options.get('spacing', '0')
     angle = style_options.get('angle', '0')
-    border_style = style_options.get('border_style', '1')
+    # ASS BorderStyle: 1 = outline+shadow (BackColour=shadow), 3 = opaque box (BackColour=box fill)
+    use_box = style_options.get('box', False)
+    border_style = '3' if use_box else str(style_options.get('border_style', 1))
     outline_width = style_options.get('outline_width', '2')
     shadow_offset = style_options.get('shadow_offset', '0')
 
@@ -293,7 +414,7 @@ def create_style_line(style_options, video_resolution):
     alignment = 5
 
     style_line = (
-        f"Style: Default,{font_family},{font_size},{line_color},{secondary_color},"
+        f"Style: Default,{ass_font_name},{font_size},{line_color},{secondary_color},"
         f"{outline_color},{box_color},{bold},{italic},{underline},{strikeout},"
         f"{scale_x},{scale_y},{spacing},{angle},{border_style},{outline_width},"
         f"{shadow_offset},{alignment},{margin_l},{margin_r},{margin_v},0"
@@ -633,6 +754,7 @@ def srt_to_ass(transcription_result, style_type, settings, replace_dict, video_r
         'outline_width': 2,
         'shadow_offset': 0,
         'border_style': 1,
+        'box': False,
         'x': None,
         'y': None,
         'position': 'middle_center',
@@ -844,15 +966,27 @@ def generate_ass_captions_v1(video_url, captions, settings, replace, exclude_tim
                 subtitle_content = captions_content
                 subtitle_type = 'ass'
                 logger.info(f"Job {job_id}: Detected ASS formatted captions.")
-            else:
-                # Treat as SRT
+            elif is_srt_format(captions_content):
+                # It's SRT format
                 logger.info(f"Job {job_id}: Detected SRT formatted captions.")
                 # Validate style for SRT
                 if style_type != 'classic':
                     error_message = "Only 'classic' style is supported for SRT captions."
                     logger.error(f"Job {job_id}: {error_message}")
                     return {"error": error_message}
-                transcription_result = srt_to_transcription_result(captions_content)
+                try:
+                    transcription_result = srt_to_transcription_result(captions_content)
+                except Exception as e:
+                    logger.error(f"Job {job_id}: Error parsing SRT content: {str(e)}")
+                    return {"error": f"Invalid SRT format: {str(e)}"}
+                # Generate ASS based on chosen style
+                subtitle_content = process_subtitle_events(transcription_result, style_type, style_options, replace_dict, video_resolution)
+                subtitle_type = 'ass'
+            else:
+                # It's plain text - display for entire video duration
+                logger.info(f"Job {job_id}: Detected plain text captions.")
+                video_duration = get_video_duration(video_path)
+                transcription_result = plain_text_to_transcription_result(captions_content, video_duration)
                 # Generate ASS based on chosen style
                 subtitle_content = process_subtitle_events(transcription_result, style_type, style_options, replace_dict, video_resolution)
                 subtitle_type = 'ass'

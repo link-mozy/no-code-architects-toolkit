@@ -27,6 +27,9 @@ if not API_KEY:
 # Storage path setting
 LOCAL_STORAGE_PATH = os.environ.get('LOCAL_STORAGE_PATH', '/tmp')
 
+# Custom fonts directory (e.g. /usr/share/fonts/custom in Docker). Font filenames (without extension) can be used as font_family.
+CUSTOM_FONTS_DIR = os.environ.get('CUSTOM_FONTS_DIR', '/usr/share/fonts/custom')
+
 # GCP environment variables
 GCP_SA_CREDENTIALS = os.environ.get('GCP_SA_CREDENTIALS', '')
 GCP_BUCKET_NAME = os.environ.get('GCP_BUCKET_NAME', '')
