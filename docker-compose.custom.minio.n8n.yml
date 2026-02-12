@@ -6,7 +6,7 @@ services:
     env_file:
       - .env.custom.minio.n8n
     ports:
-      - "8080:8080"
+      - "18083:18083"
     volumes:
       - storage:/app/storage
       - logs:/app/logs
