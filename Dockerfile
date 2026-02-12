@@ -198,13 +198,13 @@ RUN playwright install chromium
 COPY . .
 
 # Expose the port the app runs on
-EXPOSE 8080
+EXPOSE 18083
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
 
 RUN echo '#!/bin/bash\n\
-gunicorn --bind 0.0.0.0:8080 \
+gunicorn --bind 0.0.0.0:18083 \
     --workers ${GUNICORN_WORKERS:-2} \
     --timeout ${GUNICORN_TIMEOUT:-300} \
     --worker-class sync \
